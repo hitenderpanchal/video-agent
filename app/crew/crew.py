@@ -201,7 +201,13 @@ class VideoContentCrew:
             # --- Generate videos via ComfyUI (if URL provided) ---
             if self.request.comfyui_url:
                 self._notify_step("Generating videos via ComfyUI", 92)
-                package = self._generate_videos(package, job_id)
+                try:
+                    package = self._generate_videos(package, job_id)
+                except Exception as e:
+                    logger.warning(
+                        f"ComfyUI video generation failed (returning prompts only): {e}"
+                    )
+                    # Don't crash — still return the prompts package
 
             self._notify_step("Completed", 100)
             return package
