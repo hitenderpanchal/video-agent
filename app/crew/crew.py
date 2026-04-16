@@ -198,8 +198,8 @@ class VideoContentCrew:
             # --- Parse into structured format ---
             package = self._parse_crew_output(task_outputs)
 
-            # --- Generate videos via ComfyUI (if URL provided) ---
-            if self.request.comfyui_url:
+            # --- Generate videos via ComfyUI (if wrapper URL + token provided) ---
+            if self.request.api_wrapper_url and self.request.comfyui_token:
                 self._notify_step("Generating videos via ComfyUI", 92)
                 try:
                     package = self._generate_videos(package, job_id)
@@ -217,19 +217,27 @@ class VideoContentCrew:
             raise
 
     def _generate_videos(self, package: VideoContentPackage, job_id: str) -> VideoContentPackage:
-        """Send each scene's video prompt to ComfyUI for video generation."""
+        """Send each scene's video prompt to ComfyUI via the API wrapper."""
         from app.comfyui_client import ComfyUIClient
 
-        comfyui_url = self.request.comfyui_url
-        logger.info(f"Starting ComfyUI video generation: {comfyui_url}")
+        api_wrapper_url = self.request.api_wrapper_url
+        token = self.request.comfyui_token
+        comfyui_url = self.request.comfyui_url  # for file downloads
 
-        client = ComfyUIClient(base_url=comfyui_url, timeout=900)
+        logger.info(f"Starting ComfyUI video generation: {api_wrapper_url}")
 
-        # Check ComfyUI health
+        client = ComfyUIClient(
+            api_wrapper_url=api_wrapper_url,
+            token=token,
+            comfyui_url=comfyui_url,
+            timeout=900,
+        )
+
+        # Check API wrapper health
         is_healthy = asyncio.run(client.check_health())
         if not is_healthy:
-            logger.error(f"ComfyUI server not reachable at {comfyui_url}")
-            raise ConnectionError(f"Cannot connect to ComfyUI at {comfyui_url}")
+            logger.error(f"API wrapper not reachable at {api_wrapper_url}")
+            raise ConnectionError(f"Cannot connect to API wrapper at {api_wrapper_url}")
 
         video_urls = []
         total_scenes = len(package.scenes)

@@ -98,7 +98,15 @@ class GenerateRequest(BaseModel):
     )
     comfyui_url: Optional[str] = Field(
         default=None,
-        description="ComfyUI server URL for video generation (e.g., http://vast-ai-ip:8188)"
+        description="Direct ComfyUI URL for file downloads (e.g., http://vast-ai-ip:port)"
+    )
+    api_wrapper_url: Optional[str] = Field(
+        default=None,
+        description="API wrapper URL for authenticated ComfyUI access (e.g., http://vast-ai-ip:port)"
+    )
+    comfyui_token: Optional[str] = Field(
+        default=None,
+        description="Authentication token for the API wrapper"
     )
 
 
