@@ -96,6 +96,10 @@ class GenerateRequest(BaseModel):
         description="Any additional creative direction or constraints",
         max_length=2000
     )
+    comfyui_url: Optional[str] = Field(
+        default=None,
+        description="ComfyUI server URL for video generation (e.g., http://vast-ai-ip:8188)"
+    )
 
 
 # ============================================================
@@ -151,6 +155,14 @@ class Scene(BaseModel):
     transition: str = Field(
         default="fade",
         description="Transition to the next scene (e.g., 'cut', 'fade', 'dissolve', 'wipe')"
+    )
+    video_url: Optional[str] = Field(
+        default=None,
+        description="Generated video URL from ComfyUI (populated after generation)"
+    )
+    video_local_path: Optional[str] = Field(
+        default=None,
+        description="Local file path of the downloaded video"
     )
 
 
@@ -220,6 +232,10 @@ class VideoContentPackage(BaseModel):
     color_palette: list[str] = Field(
         default_factory=list,
         description="Suggested color palette hex codes for consistency"
+    )
+    video_urls: list[str] = Field(
+        default_factory=list,
+        description="Generated video URLs from ComfyUI, one per scene"
     )
 
 

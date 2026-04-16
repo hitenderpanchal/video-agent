@@ -12,6 +12,7 @@ import json
 import os
 import re
 import logging
+import asyncio
 from datetime import datetime, timezone
 from crewai import Crew, Process
 
@@ -197,12 +198,78 @@ class VideoContentCrew:
             # --- Parse into structured format ---
             package = self._parse_crew_output(task_outputs)
 
+            # --- Generate videos via ComfyUI (if URL provided) ---
+            if self.request.comfyui_url:
+                self._notify_step("Generating videos via ComfyUI", 92)
+                package = self._generate_videos(package, job_id)
+
             self._notify_step("Completed", 100)
             return package
 
         except Exception as e:
             logger.error(f"Pipeline failed: {str(e)}", exc_info=True)
             raise
+
+    def _generate_videos(self, package: VideoContentPackage, job_id: str) -> VideoContentPackage:
+        """Send each scene's video prompt to ComfyUI for video generation."""
+        from app.comfyui_client import ComfyUIClient
+
+        comfyui_url = self.request.comfyui_url
+        logger.info(f"Starting ComfyUI video generation: {comfyui_url}")
+
+        client = ComfyUIClient(base_url=comfyui_url, timeout=900)
+
+        # Check ComfyUI health
+        is_healthy = asyncio.run(client.check_health())
+        if not is_healthy:
+            logger.error(f"ComfyUI server not reachable at {comfyui_url}")
+            raise ConnectionError(f"Cannot connect to ComfyUI at {comfyui_url}")
+
+        video_urls = []
+        total_scenes = len(package.scenes)
+
+        for i, scene in enumerate(package.scenes):
+            scene_progress = 92 + int((i / total_scenes) * 7)  # 92-99%
+            self._notify_step(
+                f"Generating video — Scene {scene.scene_number}/{total_scenes}",
+                scene_progress,
+            )
+
+            try:
+                # Cap scene duration for ComfyUI (max ~4.8s at 25fps/121 frames)
+                duration = min(scene.duration_seconds, 4)
+
+                result = asyncio.run(
+                    client.generate_scene_video(
+                        prompt=scene.video_prompt,
+                        negative_prompt=scene.negative_prompt,
+                        duration_seconds=duration,
+                        job_id=job_id,
+                        scene_number=scene.scene_number,
+                    )
+                )
+
+                if result.get("video_url"):
+                    scene.video_url = result["video_url"]
+                    scene.video_local_path = result.get("local_path")
+                    video_urls.append(result["video_url"])
+                    logger.info(
+                        f"Scene {scene.scene_number} video generated: {result['video_url']}"
+                    )
+                else:
+                    logger.warning(f"Scene {scene.scene_number}: No video URL returned")
+
+            except Exception as e:
+                logger.error(
+                    f"Scene {scene.scene_number} video generation failed: {e}",
+                    exc_info=True,
+                )
+                # Continue with other scenes — don't fail the entire pipeline
+                continue
+
+        package.video_urls = video_urls
+        logger.info(f"Video generation complete: {len(video_urls)}/{total_scenes} videos")
+        return package
 
     def _parse_crew_output(self, task_outputs: dict) -> VideoContentPackage:
         """Parse raw agent text outputs into structured VideoContentPackage."""

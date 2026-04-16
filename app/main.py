@@ -110,6 +110,7 @@ def _run_pipeline_sync(job: Job, request: GenerateRequest):
             "Running pipeline — Image Prompt Agent": 75,
             "Running pipeline — Thumbnail Agent": 85,
             "Parsing results": 90,
+            "Generating videos via ComfyUI": 92,
             "Completed": 100,
         }
 
