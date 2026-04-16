@@ -1,0 +1,23 @@
+version: "3.8"
+
+services:
+  video-agent-api:
+    build: .
+    container_name: video-agent-api
+    ports:
+      - "${API_PORT:-8000}:8000"
+    env_file:
+      - .env
+    restart: unless-stopped
+    volumes:
+      - ./logs:/app/logs
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; r = httpx.get('http://localhost:8000/api/health'); r.raise_for_status()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
