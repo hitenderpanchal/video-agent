@@ -1,9 +1,9 @@
 """
-ComfyUI API Client — sends video generation prompts via the Vast.ai API Wrapper.
+ComfyUI API Client — sends video generation prompts to ComfyUI.
 
-The Vast.ai setup uses an API wrapper that wraps ComfyUI with authentication.
-Endpoint: POST /generate/sync?token=TOKEN
-Payload:  { "input": { "workflow_json": {...}, "request_id": "..." } }
+Supports two modes:
+1. Direct ComfyUI API (POST /prompt) — standard ComfyUI
+2. API Wrapper (POST /generate/sync?token=) — Vast.ai wrapper
 
 Node Mapping (from LTX 2.3 workflow_api.json):
   267:266 → Positive prompt (PrimitiveStringMultiline)
@@ -17,11 +17,13 @@ Node Mapping (from LTX 2.3 workflow_api.json):
 
 import json
 import os
+import time
 import uuid
 import logging
 import copy
 import random
 import httpx
+import asyncio
 
 logger = logging.getLogger(__name__)
 
@@ -51,35 +53,29 @@ MAX_FRAMES = 121  # LTX 2.3 max
 
 
 class ComfyUIClient:
-    """Client for interacting with ComfyUI via the Vast.ai API wrapper.
+    """Client for interacting with ComfyUI.
 
-    The API wrapper adds authentication and wraps the ComfyUI prompt API.
-    Uses /generate/sync for synchronous generation.
+    Tries two approaches:
+    1. API Wrapper (/generate/sync with token) — if api_wrapper_url is set
+    2. Direct ComfyUI API (/prompt) — standard ComfyUI REST API
     """
 
     def __init__(
         self,
-        api_wrapper_url: str,
-        token: str,
-        comfyui_url: str | None = None,
+        comfyui_url: str,
+        api_wrapper_url: str | None = None,
+        token: str | None = None,
         timeout: float = 600,
     ):
-        """Initialize the ComfyUI client.
-
-        Args:
-            api_wrapper_url: API wrapper URL (e.g., http://ip:port)
-            token: Authentication token for the API wrapper
-            comfyui_url: Direct ComfyUI URL for downloading files (optional)
-            timeout: Max wait time for video generation in seconds
-        """
-        self.api_wrapper_url = api_wrapper_url.rstrip("/")
+        self.comfyui_url = comfyui_url.rstrip("/")
+        self.api_wrapper_url = api_wrapper_url.rstrip("/") if api_wrapper_url else None
         self.token = token
-        self.comfyui_url = comfyui_url.rstrip("/") if comfyui_url else None
         self.timeout = timeout
+        self.client_id = str(uuid.uuid4())
         self._workflow_template = None
         logger.info(
-            f"ComfyUI client initialized: wrapper={self.api_wrapper_url}, "
-            f"comfyui={self.comfyui_url}"
+            f"ComfyUI client initialized: comfyui={self.comfyui_url}, "
+            f"wrapper={self.api_wrapper_url}"
         )
 
     def _load_workflow_template(self) -> dict:
@@ -135,34 +131,96 @@ class ComfyUIClient:
         )
         return workflow
 
+    # ================================================================
+    # Health Check
+    # ================================================================
+
     async def check_health(self) -> bool:
-        """Check if the API wrapper is reachable."""
+        """Check if ComfyUI is reachable."""
         try:
             async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
-                resp = await client.get(
-                    f"{self.api_wrapper_url}/queue-info",
-                    params={"token": self.token},
-                )
-                # Accept any non-error response (2xx or 3xx)
+                # Try direct ComfyUI /system_stats endpoint
+                resp = await client.get(f"{self.comfyui_url}/system_stats")
                 is_ok = resp.status_code < 400
-                logger.info(
-                    f"API wrapper health check: {resp.status_code} → {'OK' if is_ok else 'FAIL'}"
-                )
+                logger.info(f"ComfyUI health check ({self.comfyui_url}): {resp.status_code} → {'OK' if is_ok else 'FAIL'}")
                 return is_ok
         except Exception as e:
-            logger.warning(f"API wrapper health check failed: {e}")
+            logger.warning(f"ComfyUI health check failed: {e}")
             return False
 
-    async def generate_sync(self, workflow: dict, request_id: str) -> dict:
-        """Send a workflow for synchronous generation via the API wrapper.
+    # ================================================================
+    # Method 1: Direct ComfyUI API (POST /prompt → poll /history)
+    # ================================================================
 
-        Args:
-            workflow: The workflow dict to execute
-            request_id: Unique request ID for tracking
+    async def _queue_prompt_direct(self, workflow: dict) -> str:
+        """Queue a prompt via standard ComfyUI API."""
+        payload = {
+            "prompt": workflow,
+            "client_id": self.client_id,
+        }
 
-        Returns:
-            Response dict from the API wrapper
-        """
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+            resp = await client.post(
+                f"{self.comfyui_url}/prompt",
+                json=payload,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            prompt_id = data["prompt_id"]
+            logger.info(f"Queued prompt via direct API: {prompt_id}")
+            return prompt_id
+
+    async def _wait_for_completion(self, prompt_id: str) -> dict:
+        """Poll /history until the prompt completes."""
+        start_time = time.time()
+        poll_interval = 5  # seconds
+
+        logger.info(f"Waiting for prompt {prompt_id} to complete (timeout: {self.timeout}s)...")
+
+        while time.time() - start_time < self.timeout:
+            try:
+                async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+                    resp = await client.get(f"{self.comfyui_url}/history/{prompt_id}")
+                    if resp.status_code == 200:
+                        history = resp.json()
+                        if prompt_id in history:
+                            prompt_data = history[prompt_id]
+                            status = prompt_data.get("status", {})
+
+                            # Check completion
+                            if status.get("completed", False) or status.get("status_str") == "success":
+                                elapsed = time.time() - start_time
+                                logger.info(f"Prompt {prompt_id} completed in {elapsed:.1f}s")
+                                return prompt_data
+
+                            # Check for errors
+                            if status.get("status_str") == "error":
+                                error_msg = str(status.get("messages", "Unknown error"))
+                                raise RuntimeError(f"ComfyUI execution failed: {error_msg}")
+
+                            # If outputs exist, it's done even without status field
+                            outputs = prompt_data.get("outputs", {})
+                            if outputs:
+                                elapsed = time.time() - start_time
+                                logger.info(f"Prompt {prompt_id} completed (outputs found) in {elapsed:.1f}s")
+                                return prompt_data
+
+            except httpx.HTTPError as e:
+                logger.warning(f"Poll error (will retry): {e}")
+
+            await asyncio.sleep(poll_interval)
+
+        raise TimeoutError(f"ComfyUI prompt {prompt_id} did not complete within {self.timeout}s")
+
+    # ================================================================
+    # Method 2: API Wrapper (/generate/sync)
+    # ================================================================
+
+    async def _generate_via_wrapper(self, workflow: dict, request_id: str) -> dict:
+        """Send a workflow via the API wrapper for synchronous generation."""
+        if not self.api_wrapper_url or not self.token:
+            raise ValueError("API wrapper URL and token are required for wrapper mode")
+
         payload = {
             "input": {
                 "request_id": request_id,
@@ -181,7 +239,7 @@ class ComfyUIClient:
             }
         }
 
-        logger.info(f"Sending sync generation request: {request_id}")
+        logger.info(f"Sending sync generation request via wrapper: {request_id}")
 
         async with httpx.AsyncClient(timeout=self.timeout, follow_redirects=True) as client:
             resp = await client.post(
@@ -190,41 +248,52 @@ class ComfyUIClient:
                 json=payload,
             )
             resp.raise_for_status()
-            result = resp.json()
+            return resp.json()
 
-        logger.info(f"Generation response received for {request_id}")
-        return result
+    # ================================================================
+    # Unified Generate
+    # ================================================================
 
-    def _extract_video_filename(self, result: dict) -> str | None:
-        """Extract the video filename from the API wrapper response.
+    async def generate(self, workflow: dict, request_id: str) -> dict:
+        """Generate video — tries direct ComfyUI API first, then wrapper.
 
-        The response structure contains comfyui_response with node outputs.
+        Returns:
+            dict with output information
         """
-        # Try comfyui_response first
-        comfyui_resp = result.get("comfyui_response", {})
+        # Try direct ComfyUI API first (POST /prompt → poll /history)
+        try:
+            logger.info("Trying direct ComfyUI API (POST /prompt)...")
+            prompt_id = await self._queue_prompt_direct(workflow)
+            history = await self._wait_for_completion(prompt_id)
+            return {"method": "direct", "prompt_id": prompt_id, "history": history}
+        except Exception as e:
+            logger.warning(f"Direct ComfyUI API failed: {e}")
 
-        # Check the SaveVideo node (75)
-        save_node = comfyui_resp.get("75", {})
+        # Fallback: try API wrapper
+        if self.api_wrapper_url and self.token:
+            try:
+                logger.info("Trying API wrapper (/generate/sync)...")
+                result = await self._generate_via_wrapper(workflow, request_id)
+                return {"method": "wrapper", "result": result}
+            except Exception as e:
+                logger.error(f"API wrapper also failed: {e}")
+                raise
 
-        # Look for gifs/videos in the output
-        for key in ["gifs", "videos", "images"]:
-            items = save_node.get(key, [])
-            if items:
-                filename = items[0].get("filename")
-                if filename:
-                    logger.info(f"Found output file: {filename}")
-                    return filename
+        raise RuntimeError("All ComfyUI generation methods failed")
 
-        # Try output field
-        output = result.get("output", [])
-        if output and isinstance(output, list):
-            for item in output:
-                if isinstance(item, dict) and "filename" in item:
-                    return item["filename"]
+    # ================================================================
+    # Extract output filename
+    # ================================================================
 
-        # Search all nodes in comfyui_response
-        for node_id, node_output in comfyui_resp.items():
-            if isinstance(node_output, dict):
+    def _extract_video_filename(self, gen_result: dict) -> str | None:
+        """Extract the video filename from generation result."""
+
+        if gen_result.get("method") == "direct":
+            # Direct API: look in history → outputs
+            history = gen_result.get("history", {})
+            outputs = history.get("outputs", {})
+
+            for node_id, node_output in outputs.items():
                 for key in ["gifs", "videos", "images"]:
                     items = node_output.get(key, [])
                     if items:
@@ -233,31 +302,43 @@ class ComfyUIClient:
                             logger.info(f"Found output in node {node_id}: {filename}")
                             return filename
 
+        elif gen_result.get("method") == "wrapper":
+            # Wrapper API: look in comfyui_response
+            result = gen_result.get("result", {})
+            comfyui_resp = result.get("comfyui_response", {})
+
+            for node_id, node_output in comfyui_resp.items():
+                if isinstance(node_output, dict):
+                    for key in ["gifs", "videos", "images"]:
+                        items = node_output.get(key, [])
+                        if items:
+                            filename = items[0].get("filename")
+                            if filename:
+                                logger.info(f"Found output in node {node_id}: {filename}")
+                                return filename
+
+            # Also check top-level output
+            output = result.get("output", [])
+            if output and isinstance(output, list):
+                for item in output:
+                    if isinstance(item, dict) and "filename" in item:
+                        return item["filename"]
+
         logger.warning("No output file found in response")
         return None
 
+    # ================================================================
+    # Download
+    # ================================================================
+
     async def download_video(self, filename: str, save_path: str) -> str:
-        """Download a generated video from ComfyUI.
-
-        Args:
-            filename: The filename from the generation response
-            save_path: Local file path to save the video
-
-        Returns:
-            The saved file path
-        """
+        """Download a generated video from ComfyUI."""
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
 
-        # Use direct ComfyUI URL if available, otherwise use wrapper
-        download_base = self.comfyui_url or self.api_wrapper_url
-
-        async with httpx.AsyncClient(timeout=120) as client:
+        async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
             resp = await client.get(
-                f"{download_base}/view",
-                params={
-                    "filename": filename,
-                    "type": "output",
-                },
+                f"{self.comfyui_url}/view",
+                params={"filename": filename, "type": "output"},
             )
             resp.raise_for_status()
             with open(save_path, "wb") as f:
@@ -266,6 +347,10 @@ class ComfyUIClient:
         file_size = os.path.getsize(save_path)
         logger.info(f"Downloaded video: {save_path} ({file_size / 1024 / 1024:.1f} MB)")
         return save_path
+
+    # ================================================================
+    # Full Pipeline
+    # ================================================================
 
     async def generate_scene_video(
         self,
@@ -278,27 +363,13 @@ class ComfyUIClient:
         width: int = DEFAULT_WIDTH,
         height: int = DEFAULT_HEIGHT,
     ) -> dict:
-        """Full pipeline: build workflow → generate → download.
-
-        Args:
-            prompt: Video prompt for this scene
-            negative_prompt: Negative prompt
-            duration_seconds: Scene duration
-            job_id: Job ID for file organization
-            scene_number: Scene number for naming
-            seed: Random seed (None = random)
-            width: Video width
-            height: Video height
-
-        Returns:
-            dict with video_url, local_path, filename
-        """
+        """Full pipeline: build workflow → generate → download."""
         logger.info(
             f"Generating video for scene {scene_number}: "
             f"'{prompt[:60]}...' ({duration_seconds}s)"
         )
 
-        # Build workflow with injected parameters
+        # Build workflow
         workflow = self._build_workflow(
             prompt=prompt,
             negative_prompt=negative_prompt,
@@ -308,29 +379,29 @@ class ComfyUIClient:
             height=height,
         )
 
-        # Generate synchronously
+        # Generate
         request_id = f"{job_id}_scene_{scene_number:02d}"
-        result = await self.generate_sync(workflow, request_id)
+        gen_result = await self.generate(workflow, request_id)
+
+        logger.info(f"Generation completed via {gen_result.get('method', 'unknown')} method")
 
         # Extract filename
-        filename = self._extract_video_filename(result)
+        filename = self._extract_video_filename(gen_result)
 
         response = {
             "request_id": request_id,
             "filename": filename,
             "video_url": None,
             "local_path": None,
-            "raw_response": result,
+            "method": gen_result.get("method"),
         }
 
         if filename:
-            # Build video URL
-            download_base = self.comfyui_url or self.api_wrapper_url
             response["video_url"] = (
-                f"{download_base}/view?filename={filename}&type=output"
+                f"{self.comfyui_url}/view?filename={filename}&type=output"
             )
 
-            # Download video to local storage
+            # Download to local storage
             output_dir = os.path.join(
                 os.path.dirname(os.path.dirname(__file__)),
                 "output", job_id,
