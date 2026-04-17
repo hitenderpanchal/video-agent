@@ -75,8 +75,17 @@ class ComfyUIClient:
         self._workflow_template = None
         logger.info(
             f"ComfyUI client initialized: comfyui={self.comfyui_url}, "
-            f"wrapper={self.api_wrapper_url}"
+            f"wrapper={self.api_wrapper_url}, token={'set' if self.token else 'none'}"
         )
+
+    def _auth_params(self, extra: dict | None = None) -> dict:
+        """Build query params with authentication token."""
+        params = {}
+        if self.token:
+            params["token"] = self.token
+        if extra:
+            params.update(extra)
+        return params
 
     def _load_workflow_template(self) -> dict:
         """Load the LTX 2.3 workflow JSON template."""
@@ -139,8 +148,10 @@ class ComfyUIClient:
         """Check if ComfyUI is reachable."""
         try:
             async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
-                # Try direct ComfyUI /system_stats endpoint
-                resp = await client.get(f"{self.comfyui_url}/system_stats")
+                resp = await client.get(
+                    f"{self.comfyui_url}/system_stats",
+                    params=self._auth_params(),
+                )
                 is_ok = resp.status_code < 400
                 logger.info(f"ComfyUI health check ({self.comfyui_url}): {resp.status_code} → {'OK' if is_ok else 'FAIL'}")
                 return is_ok
@@ -162,6 +173,7 @@ class ComfyUIClient:
         async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
             resp = await client.post(
                 f"{self.comfyui_url}/prompt",
+                params=self._auth_params(),
                 json=payload,
             )
             resp.raise_for_status()
@@ -180,7 +192,10 @@ class ComfyUIClient:
         while time.time() - start_time < self.timeout:
             try:
                 async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
-                    resp = await client.get(f"{self.comfyui_url}/history/{prompt_id}")
+                    resp = await client.get(
+                        f"{self.comfyui_url}/history/{prompt_id}",
+                        params=self._auth_params(),
+                    )
                     if resp.status_code == 200:
                         history = resp.json()
                         if prompt_id in history:
@@ -338,7 +353,7 @@ class ComfyUIClient:
         async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
             resp = await client.get(
                 f"{self.comfyui_url}/view",
-                params={"filename": filename, "type": "output"},
+                params=self._auth_params({"filename": filename, "type": "output"}),
             )
             resp.raise_for_status()
             with open(save_path, "wb") as f:
