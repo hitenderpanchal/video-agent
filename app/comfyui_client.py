@@ -138,12 +138,17 @@ class ComfyUIClient:
     async def check_health(self) -> bool:
         """Check if the API wrapper is reachable."""
         try:
-            async with httpx.AsyncClient(timeout=15) as client:
+            async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
                 resp = await client.get(
                     f"{self.api_wrapper_url}/queue-info",
                     params={"token": self.token},
                 )
-                return resp.status_code == 200
+                # Accept any non-error response (2xx or 3xx)
+                is_ok = resp.status_code < 400
+                logger.info(
+                    f"API wrapper health check: {resp.status_code} → {'OK' if is_ok else 'FAIL'}"
+                )
+                return is_ok
         except Exception as e:
             logger.warning(f"API wrapper health check failed: {e}")
             return False
@@ -178,7 +183,7 @@ class ComfyUIClient:
 
         logger.info(f"Sending sync generation request: {request_id}")
 
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
+        async with httpx.AsyncClient(timeout=self.timeout, follow_redirects=True) as client:
             resp = await client.post(
                 f"{self.api_wrapper_url}/generate/sync",
                 params={"token": self.token},
