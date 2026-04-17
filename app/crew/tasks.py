@@ -132,43 +132,52 @@ Rules:
 
 
 def create_video_prompt_task(agent: Agent, style: str) -> Task:
-    """Task 4: Generate ComfyUI video prompts for each scene."""
+    """Task 4: Generate LTX Video 2.3 prompts for each scene."""
     return Task(
-        description=f"""Create optimized ComfyUI video generation prompts for each scene.
+        description=f"""Create optimized LTX Video 2.3 prompts for each scene from the Script Writer's breakdown.
 
 **Visual Style:** {style}
+**Target Model:** LTX Video 2.3 (NOT Stable Diffusion)
 
 For EACH scene, provide:
 
 SCENE [number] VIDEO PROMPT:
-POSITIVE: [Optimized video generation prompt - 50-120 words, comma-separated descriptors]
-NEGATIVE: [Scene-specific negative prompt]
-CAMERA_MOTION: [Motion keyword for video model]
-FPS: [24 for cinematic, 30 for smooth motion]
-GUIDANCE_SCALE: [7-12 recommended]
+POSITIVE: [LTX 2.3 paragraph prompt — see rules below]
+NEGATIVE: [Short focused negative — max 15 words]
+CAMERA: [Simple camera description]
+DURATION: [seconds matching the script]
 
-Prompt Structure (in this order):
-1. Main subject + action
-2. Environment/setting  
-3. Lighting conditions
-4. Atmospheric effects
-5. Camera movement instruction
-6. Style modifiers matching "{style}"
-7. Quality tags: masterpiece, best quality, 4k, cinematic lighting, detailed
+### CRITICAL: LTX 2.3 Prompt Format
+Write each prompt as a **single flowing paragraph** (4-8 sentences), like a film director writing shot notes.
 
-Rules:
-- EVERY prompt must include quality boosters at the end
-- Front-load the most important elements
-- Describe motion explicitly ("walking slowly", "leaves falling")
-- Use camera-specific keywords (camera: slow zoom in, camera: pan left)
-- Maintain consistent style tags across ALL scenes
-- No text descriptions — video models can't generate text
-- Negative prompts should target scene-specific risks""",
+Weave these 6 elements into ONE natural paragraph:
+1. Shot framing (wide shot, close-up, tracking shot)
+2. Scene environment (lighting, textures, colors, atmosphere)
+3. Subject details (age, clothing, features — describe emotions PHYSICALLY)
+4. Action in present tense ("she reaches forward", "the light flickers")
+5. Camera movement ("the camera pushes in slowly", "a handheld shot follows")
+6. Audio/ambient sound ("rain taps on metal", "distant laughter")
+
+### ABSOLUTE RULES:
+- Write in PRESENT TENSE always
+- Use PHYSICAL descriptions for emotions ("hands trembling, eyes glistening") — NEVER abstract labels ("sad", "happy")
+- ONE scene per prompt — NEVER describe montages
+- NEVER use Stable Diffusion tags (masterpiece, best quality, 8k, film grain, bokeh, uhd)
+- NEVER use comma-separated keyword lists
+- Keep negative prompts SHORT (under 15 words): "worst quality, inconsistent motion, blurry, jittery, distorted"
+- Match detail to duration: short clips = 3-4 sentences, long clips = 6-8 sentences
+
+### GOOD example:
+"A tired detective stands under a flickering street lamp in a narrow, rain-slicked alleyway after midnight. The camera performs a slow push-in toward his face as he lights a cigarette, his shoulders tense and jaw tight. Neon signs in red and blue reflect off the puddles. The audio captures rain tapping against metal and the distant wail of a siren."
+
+### BAD example (DO NOT DO THIS):
+"detective, alley, rain, night, neon lights, cinematic, masterpiece, best quality, 8k, film grain, bokeh"
+""",
         expected_output=(
-            "ComfyUI-optimized video generation prompts for every scene. Each includes: "
-            "positive prompt (50-120 words), negative prompt, camera motion keyword, "
-            "FPS recommendation, and guidance scale. Prompts maintain visual consistency "
-            "and follow ComfyUI best practices."
+            "LTX Video 2.3 optimized prompts for every scene. Each prompt is a flowing "
+            "natural language paragraph (4-8 sentences, 40-120 words) describing shot, "
+            "environment, subject, action, camera, and audio. Negative prompts are short "
+            "(under 15 words). No Stable Diffusion tags or keyword lists."
         ),
         agent=agent,
     )
